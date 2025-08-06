@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /// @title Vesting
 /// @notice Manages vesting schedules for Tokenomic Constructor
@@ -125,7 +125,7 @@ contract Vesting is AccessControl, ReentrancyGuard, Pausable {
         // Calculate reward (vestingCoefficient% of vested amount)
         uint256 rewardAmount;
         unchecked {
-            rewardAmount = (unreleased * schedule.vestingCoefficient) / 10000; // Basis points
+            rewardAmount = (unreleased * schedule.vestingCoefficient) / 10000;
         }
 
         // Update schedule
