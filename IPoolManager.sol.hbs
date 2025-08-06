@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+/// @title IPoolManager
+/// @notice Interface for managing token pools in Tokenomic Constructor
+/// @dev Defines functions for PoolManager interactions, used by Vesting and Unlocking contracts
+interface IPoolManager {
+    /// @notice Distributes tokens from a specified pool to a recipient
+    /// @param poolTitle The title of the pool (e.g., "rewards", "stakingPool")
+    /// @param recipient The address receiving the tokens
+    /// @param amount The amount of tokens to distribute
+    function distributeFromPool(string memory poolTitle, address recipient, uint256 amount) external;
+    
+    {{#if hasPools}}
+    // Additional pool-related functions can be added here if needed
+    // Pool titles from JSON: {{#each pools.tables.pools.rows}}{{poolTitle}}{{#unless @last}}, {{/unless}}{{/each}}
+    {{/if}}
+}
