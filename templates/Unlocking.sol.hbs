@@ -16,7 +16,6 @@ contract Unlocking is AccessControl, ReentrancyGuard, Pausable {
     // Constants
     uint256 public immutable deploymentTimestamp;
     uint256 public constant SECONDS_PER_MONTH = 30 days; // 2,592,000 seconds
-    uint256 public constant decimals = 18;
 
     // Enum for destinations
     enum Destination { AgentTokens, StakedTokens }
@@ -118,7 +117,7 @@ contract Unlocking is AccessControl, ReentrancyGuard, Pausable {
             require(totalTokens > 0, string(abi.encodePacked("Invalid token amount for ", agentName)));
             totalRequiredTokens += totalTokens;
 
-            require(configs[i].endMonth > configs[i].startMonth, "End month must be greater than start month");
+            require(configs[i].endMonth > configs[i].startMonth, "End month is not correct");
 
             unlockingSchedules[agentAddress].push(UnlockingSchedule({
                 agentAddress: agentAddress,
