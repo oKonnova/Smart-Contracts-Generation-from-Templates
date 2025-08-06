@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import { Pausable } from "@openzeppelin/contracts/utils/Pausable.sol";
 import "./IToken.sol";
 import "./IPoolManager.sol";
 
@@ -132,10 +132,7 @@ contract Unlocking is AccessControl, ReentrancyGuard, Pausable {
             }));
 
             UnlockingSchedule storage schedule = unlockingSchedules[agentAddress][unlockingSchedules[agentAddress].length - 1];
-            uint256 initialTokens;
-            unchecked {
-                initialTokens = (schedule.totalTokens * schedule.initialUnlockPercentage) / 10000;
-            }
+            uint256 initialTokens = (schedule.totalTokens * schedule.initialUnlockPercentage) / 10000;
             uint256 remainingTokens = schedule.totalTokens - initialTokens;
             uint256 totalMonths = schedule.endMonth - schedule.startMonth;
             schedule.dUnlock = totalMonths > 0 ? remainingTokens / totalMonths : 0;
