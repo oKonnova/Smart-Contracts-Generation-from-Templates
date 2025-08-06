@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "./IToken.sol";
+
+/// @title PoolManager
+/// @notice Manages token pools for Tokenomic Constructor
+/// @dev Interacts with PlatformToken for role-based transfers
+contract PoolManager is AccessControl, ReentrancyGuard, Pausable {
+    IToken public immutable platformToken;
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant DISTRIBUTOR_ROLE = keccak256("DISTRIBUTOR_ROLE");
+
+    // Pool balances and distributed amounts
+    mapping(string => uint256) public poolBalances;
+    mapping(string => uint256) public distributedAmounts;
+    mapping(string => bool) public validPools; // Tracks initialized pools
+
+    // Total supply from JSON
+    uint256 public constant TOTAL_SUPPLY = {{initialData.totalTokensAmount}} * 10**18;
+
+    // Events
+    event PoolInitialized(string indexed poolTitle, uint256 amount);
+    event TokensDistributed(string indexed poolTitle, address indexed recipient, uint256 amount);
+
+    /// @notice Initializes the pool manager
+    /// @param _platformToken Address of PlatformToken contract
+    /// @param _initialAdmin Address of the admin
+    constructor(address _platformToken, address _initialAdmin) {
+        require(_platformToken != address(0) && _initialAdmin != address(0), "Invalid address");
+        platformToken = IToken(_platformToken);
+        _grantRole(DEFAULT_ADMIN_ROLE, _initialAdmin);
+        _grantRole(ADMIN_ROLE, _initialAdmin);
+        _grantRole(DISTRIBUTOR_ROLE, _initialAdmin);
+    }
+
+    /// @notice Initializes pools from JSON data
+    function initializePools() external onlyRole(ADMIN_ROLE) nonReentrant whenNotPaused {
+        uint256 totalAllocated = 0;
+
+        {{#each pools.tables.pools.rows}}
+        {
+            string memory poolTitle = "{{poolTitle}}";
+            uint256 amount = {{amount}} * 10**18;
+            poolBalances[poolTitle] = amount;
+            validPools[poolTitle] = true;
+            unchecked {
+                totalAllocated += amount;
+            }
+            emit PoolInitialized(poolTitle, amount);
+        }
+        {{/each}}
+
+        // Ensure total allocated does not exceed total supply
+        require(totalAllocated <= TOTAL_SUPPLY, "Exceeds total supply");
+    }
+
+    /// @notice Distributes tokens from a pool
+    /// @param poolTitle Pool title
+    /// @param recipient Recipient address
+    /// @param amount Amount to distribute
+    function distributeFromPool(string memory poolTitle, address recipient, uint256 amount)
+        external
+        onlyRole(DISTRIBUTOR_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
+        require(recipient != address(0), "Invalid recipient");
+        require(validPools[poolTitle], "Pool not initialized");
+        require(poolBalances[poolTitle] >= amount, "Insufficient pool balance");
+        
+        poolBalances[poolTitle] -= amount;
+        unchecked {
+            distributedAmounts[poolTitle] += amount;
+        }
+        platformToken.transferByContract(recipient, amount);
+        emit TokensDistributed(poolTitle, recipient, amount);
+    }
+
+    /// @notice Gets pool balance
+    /// @param poolTitle Pool title
+    /// @return Balance
+    function getPoolBalance(string memory poolTitle) external view returns (uint256) {
+        require(validPools[poolTitle], "Pool not initialized");
+        return poolBalances[poolTitle];
+    }
+
+    /// @notice Pauses pool operations
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Unpauses pool operations
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+}

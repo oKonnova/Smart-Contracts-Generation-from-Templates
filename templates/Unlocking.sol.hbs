@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "./IToken.sol";
+import "./IPoolManager.sol";
+
+/// @title Unlocking
+/// @notice Manages unlocking schedules for token release in Tokenomic Constructor
+/// @dev Interacts with PlatformToken and PoolManager for token transfers
+contract Unlocking is AccessControl, ReentrancyGuard, Pausable {
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+
+    // Constants
+    uint256 public immutable deploymentTimestamp;
+    uint256 public constant SECONDS_PER_MONTH = 30 days; // 2,592,000 seconds
+    uint256 public constant decimals = 18;
+
+    // Enum for destinations
+    enum Destination { AgentTokens, StakedTokens }
+
+    // Unlocking schedule structure
+    struct UnlockingSchedule {
+        address agentAddress;
+        uint256 totalTokens; // Total tokens to unlock
+        uint256 initialUnlockPercentage; // Basis points (e.g., 1000 = 10%)
+        uint256 startMonth; // Start month (relative to deployment)
+        uint256 endMonth; // End month
+        Destination destination; // AgentTokens or StakedTokens
+        uint256 releasedTokens; // Tokens already released
+        string agentName; // Agent name from JSON
+        uint256 dUnlock; // Monthly unlock amount
+    }
+
+    // Define agent configurations
+    struct AgentConfig {
+        string name;
+        uint256 initialUnlockPercentage; // Basis points
+        uint256 startMonth;
+        uint256 endMonth;
+        Destination destination;
+    }
+
+    // Contracts
+    IToken public immutable token;
+    IPoolManager public immutable poolManager;
+
+    // Mappings
+    mapping(address => UnlockingSchedule[]) public unlockingSchedules;
+    mapping(string => address) public agentNameToAddress;
+    mapping(address => uint256) public stakedTokens;
+    mapping(string => uint256) public agentTokenAmounts; // Store funded amounts
+
+    // Events
+    event TokensUnlocked(address indexed agentAddress, uint256 amount, Destination destination);
+    event AgentAddressSet(string indexed agentName, address indexed agentAddress);
+    event ScheduleAdded(address indexed agentAddress, string agentName, uint256 scheduleIndex);
+
+    /// @notice Initializes the unlocking contract
+    /// @param tokenAddress Address of PlatformToken contract
+    /// @param poolManagerAddress Address of PoolManager contract
+    /// @param initialAdmin Address of the contract admin
+    constructor(address tokenAddress, address poolManagerAddress, address initialAdmin) {
+        require(tokenAddress != address(0) && poolManagerAddress != address(0) && initialAdmin != address(0), "Invalid address");
+        token = IToken(tokenAddress);
+        poolManager = IPoolManager(poolManagerAddress);
+        deploymentTimestamp = block.timestamp;
+        _grantRole(DEFAULT_ADMIN_ROLE, initialAdmin);
+        _grantRole(ADMIN_ROLE, initialAdmin);
+    }
+
+    // Called during funding to set token amounts
+    function fundAgentTokens(string memory agentName, uint256 amount) external onlyRole(ADMIN_ROLE) {
+        require(amount > 0, "Amount must be greater than 0");
+        agentTokenAmounts[agentName] = amount;
+    }
+
+    /// @notice Returns the address mapped to an agent name
+    function getAgentAddress(string memory agentName) external view returns (address) {
+        return agentNameToAddress[agentName];
+    }
+
+    /// @notice Sets agent addresses for unlocking schedules
+    /// @param agentNames Array of agent names
+    /// @param agentAddresses Array of corresponding addresses
+    function setAgentAddresses(string[] memory agentNames, address[] memory agentAddresses) external onlyRole(ADMIN_ROLE) {
+        require(agentNames.length == agentAddresses.length, "Arrays length mismatch");
+        for (uint256 i = 0; i < agentNames.length; i++) {
+            require(agentAddresses[i] != address(0), "Invalid agent address");
+            agentNameToAddress[agentNames[i]] = agentAddresses[i];
+            emit AgentAddressSet(agentNames[i], agentAddresses[i]);
+        }
+    }
+
+    /// @notice Initializes unlocking schedules from JSON data
+    function initializeSchedules() external onlyRole(ADMIN_ROLE) nonReentrant whenNotPaused {
+        AgentConfig[{{length vestingAndUnlocking.tables.unlocking.rows}}] memory configs = [
+            {{#each vestingAndUnlocking.tables.unlocking.rows}}
+            AgentConfig({
+                name: "{{agent_optionValue}}",
+                initialUnlockPercentage: {{initialUnlocking}} * 10000, // Convert to basis points
+                startMonth: {{startUnlocking}},
+                endMonth: {{endUnlocking}},
+                destination: {{#if (eq destination "StakedTokens")}}Destination.StakedTokens{{else}}Destination.AgentTokens{{/if}}
+            }){{#unless @last}},{{/unless}}
+            {{/each}}
+        ];
+
+        uint256 totalRequiredTokens;
+        for (uint256 i = 0; i < configs.length; i++) {
+            string memory agentName = configs[i].name;
+            address agentAddress = agentNameToAddress[agentName];
+            require(agentAddress != address(0), string(abi.encodePacked("Agent address not set for ", agentName)));
+
+            uint256 totalTokens = agentTokenAmounts[agentName];
+            require(totalTokens > 0, string(abi.encodePacked("Invalid token amount for ", agentName)));
+            totalRequiredTokens += totalTokens;
+
+            require(configs[i].endMonth > configs[i].startMonth, "End month must be greater than start month");
+
+            unlockingSchedules[agentAddress].push(UnlockingSchedule({
+                agentAddress: agentAddress,
+                totalTokens: totalTokens,
+                initialUnlockPercentage: configs[i].initialUnlockPercentage,
+                startMonth: configs[i].startMonth,
+                endMonth: configs[i].endMonth,
+                destination: configs[i].destination,
+                releasedTokens: 0,
+                agentName: agentName,
+                dUnlock: 0
+            }));
+
+            UnlockingSchedule storage schedule = unlockingSchedules[agentAddress][unlockingSchedules[agentAddress].length - 1];
+            uint256 initialTokens;
+            unchecked {
+                initialTokens = (schedule.totalTokens * schedule.initialUnlockPercentage) / 10000;
+            }
+            uint256 remainingTokens = schedule.totalTokens - initialTokens;
+            uint256 totalMonths = schedule.endMonth - schedule.startMonth;
+            schedule.dUnlock = totalMonths > 0 ? remainingTokens / totalMonths : 0;
+
+            emit ScheduleAdded(agentAddress, agentName, unlockingSchedules[agentAddress].length - 1);
+        }
+
+        // Verify contract has enough tokens
+        require(token.balanceOf(address(this)) >= totalRequiredTokens, "Insufficient token balance in contract");
+    }
+
+    /// @notice Calculates unlockable tokens for an agent
+    /// @param agent Agent address
+    /// @param scheduleIndex Index of the unlocking schedule
+    /// @return Unlockable token amount
+    function calculateUnlockableTokens(address agent, uint256 scheduleIndex)
+        public
+        view
+        returns (uint256)
+    {
+        require(unlockingSchedules[agent].length > scheduleIndex, "Invalid schedule index");
+        UnlockingSchedule storage schedule = unlockingSchedules[agent][scheduleIndex];
+        if (block.timestamp < deploymentTimestamp + (schedule.startMonth * SECONDS_PER_MONTH) || schedule.totalTokens == 0) {
+            return 0;
+        }
+
+        uint256 currentMonth = (block.timestamp - deploymentTimestamp) / SECONDS_PER_MONTH + 1;
+        if (currentMonth > schedule.endMonth) currentMonth = schedule.endMonth;
+
+        uint256 initialTokens;
+        unchecked {
+            initialTokens = (schedule.totalTokens * schedule.initialUnlockPercentage) / 10000;
+        }
+        uint256 tokensToUnlock = initialTokens + (schedule.dUnlock * (currentMonth - schedule.startMonth));
+        if (tokensToUnlock > schedule.totalTokens) tokensToUnlock = schedule.totalTokens;
+
+        return tokensToUnlock - schedule.releasedTokens;
+    }
+
+    /// @notice Unlocks tokens for an agent
+    /// @param agent Agent address
+    /// @param scheduleIndex Index of the unlocking schedule
+    function unlockTokens(address agent, uint256 scheduleIndex)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        require(msg.sender == agent || hasRole(ADMIN_ROLE, msg.sender), "Unauthorized");
+        require(unlockingSchedules[agent].length > scheduleIndex, "Invalid schedule index");
+
+        UnlockingSchedule storage schedule = unlockingSchedules[agent][scheduleIndex];
+        require(schedule.agentAddress != address(0), "Agent not set");
+        require(block.timestamp >= deploymentTimestamp + (schedule.startMonth * SECONDS_PER_MONTH), "Unlocking not started");
+
+        uint256 unlockable = calculateUnlockableTokens(agent, scheduleIndex);
+        require(unlockable > 0, "No tokens to unlock");
+
+        schedule.releasedTokens += unlockable;
+
+        if (schedule.destination == Destination.StakedTokens) {
+            stakedTokens[agent] += unlockable;
+            token.transferByContract(address(this), unlockable);
+        } else {
+            token.transferByContract(agent, unlockable);
+        }
+
+        emit TokensUnlocked(agent, unlockable, schedule.destination);
+    }
+
+    /// @notice Gets remaining locked tokens for an agent
+    /// @param agent Agent address
+    /// @param scheduleIndex Index of the unlocking schedule
+    /// @return Locked token amount
+    function getLockedTokens(address agent, uint256 scheduleIndex)
+        external
+        view
+        returns (uint256)
+    {
+        require(unlockingSchedules[agent].length > scheduleIndex, "Invalid schedule index");
+        UnlockingSchedule storage schedule = unlockingSchedules[agent][scheduleIndex];
+        if (schedule.totalTokens == 0) {
+            return 0;
+        }
+        return schedule.totalTokens - calculateUnlockableTokens(agent, scheduleIndex);
+    }
+
+    /// @notice Pauses unlocking operations
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Unpauses unlocking operations
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+}

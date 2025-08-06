@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+
+/// @title Vesting
+/// @notice Manages vesting schedules for Tokenomic Constructor
+/// @dev Interacts with PlatformToken and PoolManager for vesting and rewards
+contract Vesting is AccessControl, ReentrancyGuard, Pausable {
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+
+    // Constants
+    uint256 public immutable deploymentTimestamp;
+    uint256 public constant SECONDS_PER_MONTH = 30 days; // 2,592,000 seconds
+
+    // Vesting schedule structure
+    struct VestingSchedule {
+        address agentAddress;
+        uint256 totalAmount; // Total tokens to vest
+        uint256 startMonth; // Start month (relative to deployment)
+        uint256 endMonth; // End month
+        uint256 vestingCoefficient; // Basis points (e.g., 10 for 0.1%)
+        uint256 released; // Tokens already released
+        string rewardPool; // Pool for rewards (e.g., "rewards")
+        string agentName; // Agent name from JSON
+    }
+
+    // Contracts
+    IERC20 public immutable token;
+    address public immutable poolManager;
+
+    // Mappings
+    mapping(address => VestingSchedule[]) public vestingSchedules;
+    mapping(string => address) public agentNameToAddress;
+    mapping(string => uint256) public agentTokenAmounts; // Tracks funded amounts
+
+    // Events
+    event VestingScheduleAdded(address indexed agent, string agentName, uint256 scheduleIndex);
+    event AgentAddressSet(string indexed agentName, address agentAddress);
+    event VestedTokensReleased(address indexed agent, uint256 vestedAmount, uint256 rewardAmount, string rewardPool);
+
+    /// @notice Initializes the vesting contract
+    /// @param _tokenAddress Address of PlatformToken contract
+    /// @param _poolManagerAddress Address of PoolManager contract
+    /// @param _initialAdmin Address of the admin
+    constructor(address _tokenAddress, address _poolManagerAddress, address _initialAdmin) {
+        require(_tokenAddress != address(0) && _poolManagerAddress != address(0) && _initialAdmin != address(0), "Invalid address");
+        token = IERC20(_tokenAddress);
+        poolManager = _poolManagerAddress;
+        deploymentTimestamp = block.timestamp;
+        _grantRole(DEFAULT_ADMIN_ROLE, _initialAdmin);
+        _grantRole(ADMIN_ROLE, _initialAdmin);
+    }
+
+    /// @notice Funds token amounts for agents
+    /// @param agentName Name of the agent
+    /// @param amount Amount of tokens to allocate
+    function fundAgentTokens(string memory agentName, uint256 amount) external onlyRole(ADMIN_ROLE) {
+        require(amount > 0, "Amount must be greater than 0");
+        agentTokenAmounts[agentName] = amount;
+    }
+
+    /// @notice Sets agent addresses for vesting schedules
+    /// @param agentNames Array of agent names
+    /// @param agentAddresses Array of corresponding addresses
+    function setAgentAddresses(string[] memory agentNames, address[] memory agentAddresses) 
+        external 
+        onlyRole(ADMIN_ROLE) 
+    {
+        require(agentNames.length == agentAddresses.length, "Arrays length mismatch");
+        for (uint256 i = 0; i < agentNames.length; i++) {
+            require(agentAddresses[i] != address(0), "Invalid address");
+            agentNameToAddress[agentNames[i]] = agentAddresses[i];
+            emit AgentAddressSet(agentNames[i], agentAddresses[i]);
+        }
+    }
+
+    /// @notice Initializes vesting schedules from JSON data
+    function initializeSchedules() external onlyRole(ADMIN_ROLE) nonReentrant whenNotPaused {
+        {{#each vestingAndUnlocking.tables.vesting.rows}}
+        {
+            string memory agentName = "{{agentName}}";
+            address agentAddr = agentNameToAddress[agentName];
+            require(agentAddr != address(0), "Agent address not set for {{agentName}}");
+            uint256 totalAmount = agentTokenAmounts[agentName];
+            require(totalAmount > 0, "Invalid token amount for {{agentName}}");
+            require(token.balanceOf(address(this)) >= totalAmount, "Insufficient token balance for {{agentName}}");
+            vestingSchedules[agentAddr].push(VestingSchedule({
+                agentAddress: agentAddr,
+                totalAmount: totalAmount,
+                startMonth: {{startVesting}},
+                endMonth: {{endVesting}},
+                vestingCoefficient: {{multiply vestingCoefficient 100}}, // Convert to basis points
+                released: 0,
+                rewardPool: "{{poolTitle_optionValue}}",
+                agentName: "{{agentName}}"
+            }));
+            emit VestingScheduleAdded(agentAddr, "{{agentName}}", vestingSchedules[agentAddr].length - 1);
+        }
+        {{/each}}
+    }
+
+    /// @notice Releases vested tokens and rewards for an agent
+    /// @param agent Agent address
+    /// @param scheduleIndex Index of the vesting schedule
+    function releaseVestedTokens(address agent, uint256 scheduleIndex) 
+        external 
+        nonReentrant 
+        whenNotPaused 
+    {
+        require(msg.sender == agent || hasRole(ADMIN_ROLE, msg.sender), "Unauthorized");
+        require(vestingSchedules[agent].length > scheduleIndex, "Invalid schedule index");
+
+        VestingSchedule storage schedule = vestingSchedules[agent][scheduleIndex];
+        require(block.timestamp >= deploymentTimestamp + (schedule.startMonth * SECONDS_PER_MONTH), "Vesting not started");
+
+        // Calculate vested amount
+        uint256 vestedAmount = calculateVestedAmount(agent, scheduleIndex);
+        uint256 unreleased = vestedAmount - schedule.released;
+        require(unreleased > 0, "No tokens to release");
+
+        // Calculate reward (vestingCoefficient% of vested amount)
+        uint256 rewardAmount;
+        unchecked {
+            rewardAmount = (unreleased * schedule.vestingCoefficient) / 10000; // Basis points
+        }
+
+        // Update schedule
+        schedule.released += unreleased;
+
+        // Transfer vested tokens (from Vesting contract)
+        require(token.transfer(agent, unreleased), "Vested transfer failed");
+
+        // Transfer reward tokens (from PoolManager's Rewards pool)
+        (bool success, ) = poolManager.call(
+            abi.encodeWithSignature(
+                "distributeFromPool(string,address,uint256)", 
+                schedule.rewardPool, 
+                agent, 
+                rewardAmount
+            )
+        );
+        require(success, "Reward distribution failed");
+
+        emit VestedTokensReleased(agent, unreleased, rewardAmount, schedule.rewardPool);
+    }
+
+    /// @notice Calculates vested amount for an agent
+    /// @param agent Agent address
+    /// @param scheduleIndex Index of the vesting schedule
+    /// @return Vested token amount
+    function calculateVestedAmount(address agent, uint256 scheduleIndex) 
+        public 
+        view 
+        returns (uint256) 
+    {
+        VestingSchedule storage schedule = vestingSchedules[agent][scheduleIndex];
+        if (block.timestamp < deploymentTimestamp + (schedule.startMonth * SECONDS_PER_MONTH) || schedule.totalAmount == 0) {
+            return 0;
+        }
+
+        uint256 currentTime = block.timestamp;
+        uint256 endTime = deploymentTimestamp + (schedule.endMonth * SECONDS_PER_MONTH);
+        if (currentTime >= endTime) {
+            return schedule.totalAmount;
+        }
+
+        uint256 timeElapsed = currentTime - (deploymentTimestamp + (schedule.startMonth * SECONDS_PER_MONTH));
+        uint256 vestingDuration = (schedule.endMonth - schedule.startMonth) * SECONDS_PER_MONTH;
+        return (schedule.totalAmount * timeElapsed) / vestingDuration;
+    }
+
+    /// @notice Gets remaining locked tokens for an agent
+    /// @param agent Agent address
+    /// @param scheduleIndex Index of the vesting schedule
+    /// @return Locked token amount
+    function getLockedTokens(address agent, uint256 scheduleIndex) 
+        external 
+        view 
+        returns (uint256) 
+    {
+        VestingSchedule storage schedule = vestingSchedules[agent][scheduleIndex];
+        if (schedule.totalAmount == 0) {
+            return 0;
+        }
+        return schedule.totalAmount - calculateVestedAmount(agent, scheduleIndex);
+    }
+
+    /// @notice Pauses vesting operations
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Unpauses vesting operations
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+}

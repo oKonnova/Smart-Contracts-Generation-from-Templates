@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+
+/// @title {{initialData.tokenName}}Token
+/// @notice ERC-20 token with role-based access for contract transfers
+/// @dev Implements OpenZeppelin ERC20, AccessControl, and Pausable
+contract {{initialData.tokenName}}Token is ERC20, AccessControl, Pausable {
+    bytes32 public constant TRANSFER_ROLE = keccak256("TRANSFER_ROLE");
+
+    /// @notice Initializes the token with name, symbol, and total supply
+    /// @param initialOwner Address of the contract owner
+    constructor(address initialOwner)
+        ERC20("{{initialData.tokenName}}", "{{#if initialData.tokenSymbol}}{{initialData.tokenSymbol}}{{else}}{{initialData.tokenName}}_TK{{/if}}")
+    {
+        require(initialOwner != address(0), "Invalid owner");
+        _mint(msg.sender, {{initialData.totalTokensAmount}} * 10 ** decimals());
+        _grantRole(DEFAULT_ADMIN_ROLE, initialOwner);
+        _grantRole(TRANSFER_ROLE, initialOwner);
+    }
+
+    /// @notice Allows contracts with TRANSFER_ROLE to transfer tokens
+    /// @param to Recipient address
+    /// @param amount Amount of tokens to transfer
+    function transferByContract(address to, uint256 amount) external onlyRole(TRANSFER_ROLE) whenNotPaused {
+        require(to != address(0), "Invalid recipient");
+        _transfer(address(this), to, amount);
+    }
+
+    /// @notice Pauses all token transfers
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /// @notice Unpauses token transfers
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+}
